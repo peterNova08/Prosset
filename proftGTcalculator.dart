@@ -1,3 +1,4 @@
+// Full updated file with admin tax settings
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -17,11 +18,13 @@ class CustomParameter {
   TextEditingController controller;
   String type;
   IconData icon;
+
   CustomParameter({
     required this.name,
     required this.type,
     required this.icon,
   }) : controller = TextEditingController();
+
   void dispose() => controller.dispose();
 }
 
@@ -29,6 +32,7 @@ class ChartDataPoint {
   final DateTime date;
   final double profit;
   final String label;
+
   ChartDataPoint({
     required this.date,
     required this.profit,
@@ -36,6 +40,7 @@ class ChartDataPoint {
   });
 }
 
+// === UPDATED: GraduatedTaxResult (adds rate + bracket) ===
 class GraduatedTaxResult {
   final double grossIncome;
   final double totalExpenses;
@@ -50,6 +55,10 @@ class GraduatedTaxResult {
   final double annualIncomeTax;
   final double annualNetProfitAfterTax;
   final bool isAnnualTaxExempt;
+  // NEW FIELDS
+  final double taxRateApplied;
+  final String taxBracket;
+
   GraduatedTaxResult({
     required this.grossIncome,
     required this.totalExpenses,
@@ -63,17 +72,77 @@ class GraduatedTaxResult {
     required this.annualIncomeTax,
     required this.annualNetProfitAfterTax,
     required this.isAnnualTaxExempt,
+    required this.taxRateApplied,
+    required this.taxBracket,
   });
 }
 
-// 2025 BIR Graduated Income Tax Brackets (same as 2023–2024 under TRAIN Law)
-double calculateGraduatedIncomeTax(double netTaxableIncome) {
-  if (netTaxableIncome <= 250000) return 0.0;
-  if (netTaxableIncome <= 400000) return (netTaxableIncome - 250000) * 0.15;
-  if (netTaxableIncome <= 800000) return 22500 + (netTaxableIncome - 400000) * 0.20;
-  if (netTaxableIncome <= 2000000) return 102500 + (netTaxableIncome - 800000) * 0.25;
-  if (netTaxableIncome <= 8000000) return 402500 + (netTaxableIncome - 2000000) * 0.30;
-  return 2202500 + (netTaxableIncome - 8000000) * 0.35;
+// === NEW: TaxComputationResult helper ===
+class TaxComputationResult {
+  final double taxDue;
+  final double rateApplied;
+  final String bracketLabel;
+
+  TaxComputationResult(this.taxDue, this.rateApplied, this.bracketLabel);
+}
+
+// === NEW: Global tax settings model ===
+class TaxBracket {
+  final double threshold;
+  final double rate;
+  final double baseTax;
+
+  TaxBracket({required this.threshold, required this.rate, required this.baseTax});
+
+  Map<String, dynamic> toJson() => {
+    'threshold': threshold,
+    'rate': rate,
+    'baseTax': baseTax,
+  };
+
+  static TaxBracket fromJson(Map<String, dynamic> json) => TaxBracket(
+    threshold: (json['threshold'] as num?)?.toDouble() ?? 0,
+    rate: (json['rate'] as num?)?.toDouble() ?? 0,
+    baseTax: (json['baseTax'] as num?)?.toDouble() ?? 0,
+  );
+}
+
+// Default tax brackets (Philippines 2025)
+List<TaxBracket> _defaultTaxBrackets = [
+  TaxBracket(threshold: 250000, rate: 0.0, baseTax: 0),
+  TaxBracket(threshold: 400000, rate: 0.15, baseTax: 0),
+  TaxBracket(threshold: 800000, rate: 0.20, baseTax: 22500),
+  TaxBracket(threshold: 2000000, rate: 0.25, baseTax: 102500),
+  TaxBracket(threshold: 8000000, rate: 0.30, baseTax: 402500),
+  TaxBracket(threshold: double.infinity, rate: 0.35, baseTax: 2202500),
+];
+
+// Global variable to hold current tax settings
+List<TaxBracket> _currentTaxBrackets = [..._defaultTaxBrackets];
+
+// === UPDATED: Detailed graduated tax calculator (uses _currentTaxBrackets) ===
+TaxComputationResult calculateGraduatedIncomeTaxDetailed(double netTaxableIncome) {
+  if (netTaxableIncome <= _currentTaxBrackets[0].threshold) {
+    return TaxComputationResult(0.0, 0.0, "Tax Exempt");
+  }
+
+  for (int i = 1; i < _currentTaxBrackets.length; i++) {
+    if (netTaxableIncome <= _currentTaxBrackets[i].threshold) {
+      final prevThreshold = _currentTaxBrackets[i - 1].threshold;
+      final taxDue = _currentTaxBrackets[i].baseTax + (netTaxableIncome - prevThreshold) * _currentTaxBrackets[i].rate;
+      final ratePercent = (_currentTaxBrackets[i].rate * 100).toStringAsFixed(0);
+      String bracketLabel;
+      if (_currentTaxBrackets[i].threshold == double.infinity) {
+        bracketLabel = 'Over ₱${_currentTaxBrackets[i - 1].threshold.toInt().toString().replaceAllMapped(RegExp(r'(\d{1,3})(?=(\d{3})+(?!\d))'), (Match m) => '${m[1]},')}';
+      } else {
+        bracketLabel = '₱${_currentTaxBrackets[i - 1].threshold.toInt().toString().replaceAllMapped(RegExp(r'(\d{1,3})(?=(\d{3})+(?!\d))'), (Match m) => '${m[1]},')}–₱${_currentTaxBrackets[i].threshold.toInt().toString().replaceAllMapped(RegExp(r'(\d{1,3})(?=(\d{3})+(?!\d))'), (Match m) => '${m[1]},')}';
+      }
+      return TaxComputationResult(taxDue, double.parse(ratePercent), bracketLabel);
+    }
+  }
+
+  // fallback
+  return TaxComputationResult(0.0, 0.0, "Tax Exempt");
 }
 
 class _ProfitCalculatorPageState extends State<ProfitCalculatorPage> {
@@ -87,7 +156,12 @@ class _ProfitCalculatorPageState extends State<ProfitCalculatorPage> {
   bool _isLoading = false;
   bool _showResults = false;
   double _bankMoney = 0.0;
+  bool _isRecordsMaximized = false;
   late final String _uid;
+
+  // === NEW: Detailed breakdown for calculation ===
+  List<Map<String, dynamic>> _incomeBreakdown = [];
+  List<Map<String, dynamic>> _expenseBreakdown = [];
 
   // === NEW: Annual Tax Calculation State ===
   int _selectedTaxYear = DateTime.now().year;
@@ -117,6 +191,27 @@ class _ProfitCalculatorPageState extends State<ProfitCalculatorPage> {
     _loadBankMoney();
     _loadCustomParameters();
     _loadChartData();
+    _loadTaxSettings(); // Load tax settings on init
+  }
+
+  Future<void> _loadTaxSettings() async {
+    try {
+      final doc = await FirebaseFirestore.instance.collection('system').doc('taxSettings').get();
+      if (doc.exists) {
+        final data = doc.data()!;
+        final List<dynamic>? rawBrackets = data['brackets'] as List<dynamic>?;
+        if (rawBrackets != null && rawBrackets.isNotEmpty) {
+          final List<TaxBracket> loaded = rawBrackets.map((b) => TaxBracket.fromJson(b as Map<String, dynamic>)).toList();
+          if (mounted) {
+            setState(() {
+              _currentTaxBrackets = loaded;
+            });
+          }
+        }
+      }
+    } catch (e) {
+      debugPrint('Error loading tax settings: $e');
+    }
   }
 
   @override
@@ -344,23 +439,31 @@ class _ProfitCalculatorPageState extends State<ProfitCalculatorPage> {
     }
   }
 
+  // === UPDATED: Detailed _calculate with breakdown ===
   void _calculate() {
     double income = 0, expenses = 0;
+    List<Map<String, dynamic>> incomeList = [];
+    List<Map<String, dynamic>> expenseList = [];
     for (final p in _customParameters) {
       final rawValue = double.tryParse(p.controller.text.replaceAll(',', '')) ?? 0;
       if (rawValue <= 0) continue;
       if (p.type == 'income') {
         income += rawValue;
+        incomeList.add({'name': p.name, 'value': rawValue});
       } else {
         expenses += rawValue;
+        expenseList.add({'name': p.name, 'value': rawValue});
       }
     }
-    final currentNet = income - expenses;
+    // Explicitly compute net profit (can be negative, zero, or positive)
+    final netProfit = income - expenses;
     setState(() {
       _totalIncome = income;
       _totalExpenses = expenses;
-      _netProfit = currentNet;
-      _showResults = income > 0 || expenses > 0;
+      _netProfit = netProfit; // ✅ Clearly assigned
+      _incomeBreakdown = incomeList;
+      _expenseBreakdown = expenseList;
+      _showResults = true; // Show results even if net profit is zero or negative
     });
   }
 
@@ -389,8 +492,9 @@ class _ProfitCalculatorPageState extends State<ProfitCalculatorPage> {
         annualExpenses += (data['expenses'] as num?)?.toDouble() ?? 0;
       }
       final annualNetTaxableIncome = (annualGrossIncome - annualExpenses).clamp(0.0, double.infinity);
-      final isAnnualTaxExempt = annualNetTaxableIncome <= 250000;
-      final totalAnnualIncomeTax = isAnnualTaxExempt ? 0.0 : calculateGraduatedIncomeTax(annualNetTaxableIncome);
+      final isAnnualTaxExempt = annualNetTaxableIncome <= _currentTaxBrackets[0].threshold;
+      final taxResult = calculateGraduatedIncomeTaxDetailed(annualNetTaxableIncome);
+      final totalAnnualIncomeTax = isAnnualTaxExempt ? 0.0 : taxResult.taxDue;
       final annualNetProfitAfterTax = annualNetTaxableIncome - totalAnnualIncomeTax;
       final result = GraduatedTaxResult(
         grossIncome: 0,
@@ -405,6 +509,8 @@ class _ProfitCalculatorPageState extends State<ProfitCalculatorPage> {
         annualIncomeTax: totalAnnualIncomeTax,
         annualNetProfitAfterTax: annualNetProfitAfterTax,
         isAnnualTaxExempt: isAnnualTaxExempt,
+        taxRateApplied: taxResult.rateApplied,
+        taxBracket: taxResult.bracketLabel,
       );
       if (mounted) {
         setState(() {
@@ -424,7 +530,6 @@ class _ProfitCalculatorPageState extends State<ProfitCalculatorPage> {
   // === NEW: Save Annual Tax Liability ===
   Future<void> _saveAnnualTaxLiability() async {
     if (_annualTaxResult == null || _annualTaxResult!.annualIncomeTax <= 0) return;
-
     // Check for existing liability for this tax year
     final existingSnap = await FirebaseFirestore.instance
         .collection('users')
@@ -434,12 +539,10 @@ class _ProfitCalculatorPageState extends State<ProfitCalculatorPage> {
         .where('isTaxLiability', isEqualTo: true)
         .limit(1)
         .get();
-
     if (existingSnap.docs.isNotEmpty) {
       _showSnackBar('Tax liability for $_selectedTaxYear already exists.', SnackBarType.info);
       return;
     }
-
     try {
       await FirebaseFirestore.instance
           .collection('users')
@@ -455,7 +558,6 @@ class _ProfitCalculatorPageState extends State<ProfitCalculatorPage> {
         'taxYear': _selectedTaxYear,
         'createdAt': FieldValue.serverTimestamp(),
       });
-
       if (mounted) {
         _showSnackBar('Tax liability recorded for $_selectedTaxYear', SnackBarType.success);
       }
@@ -591,9 +693,9 @@ class _ProfitCalculatorPageState extends State<ProfitCalculatorPage> {
     }
     setState(() {
       _totalIncome = _totalExpenses = _netProfit = 0;
+      _incomeBreakdown.clear();
+      _expenseBreakdown.clear();
       _showResults = false;
-      _selectedDate = DateTime.now();
-      _saveSelectedDate(_selectedDate);
     });
     FocusScope.of(context).unfocus();
   }
@@ -772,6 +874,45 @@ class _ProfitCalculatorPageState extends State<ProfitCalculatorPage> {
     }
   }
 
+  // === NEW: Admin Tax Settings Access ===
+  void _openAdminTaxSettings() {
+    final passwordController = TextEditingController();
+    showDialog(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Admin Access'),
+          content: TextField(
+            controller: passwordController,
+            decoration: const InputDecoration(labelText: 'Enter admin password'),
+            obscureText: true,
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+            ElevatedButton(
+              onPressed: () {
+                if (passwordController.text == 'admin123') {
+                  Navigator.pop(context);
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (_) => const AdminTaxSettingsPage()),
+                  ).then((_) {
+                    _loadTaxSettings(); // Reload updated settings
+                  });
+                } else {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Incorrect password'), backgroundColor: Colors.red),
+                  );
+                }
+              },
+              child: const Text('Submit'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -786,6 +927,11 @@ class _ProfitCalculatorPageState extends State<ProfitCalculatorPage> {
           child: Container(height: 1, color: Colors.grey[200]),
         ),
         actions: [
+          IconButton(
+            tooltip: 'Admin Tax Settings',
+            icon: Icon(Icons.settings, color: Colors.purple[600]),
+            onPressed: _openAdminTaxSettings,
+          ),
           IconButton(
             tooltip: 'Add Parameter',
             icon: Icon(Icons.add, color: Colors.blue[600]),
@@ -815,7 +961,7 @@ class _ProfitCalculatorPageState extends State<ProfitCalculatorPage> {
                 const SizedBox(height: 24),
                 _buildTaxInfoCard(),
                 const SizedBox(height: 24),
-                _buildAnnualTaxCard(), // <<< NEW SECTION
+                _buildAnnualTaxCard(),
                 const SizedBox(height: 24),
                 _buildCalculatorCard(),
                 if (_showResults) ...[
@@ -834,7 +980,7 @@ class _ProfitCalculatorPageState extends State<ProfitCalculatorPage> {
     );
   }
 
-  // === NEW: Annual Tax Card ===
+  // === NEW: Annual Tax Card (updated to show rate + bracket) ===
   Widget _buildAnnualTaxCard() {
     return Container(
       padding: const EdgeInsets.all(20),
@@ -907,6 +1053,31 @@ class _ProfitCalculatorPageState extends State<ProfitCalculatorPage> {
                   _resultRow('Annual Net Taxable Income', _annualTaxResult!.annualNetTaxableIncome, Colors.blue),
                   const Divider(color: Colors.grey),
                   _resultRow('Annual Income Tax Due', _annualTaxResult!.annualIncomeTax, Colors.red),
+                  if (!_annualTaxResult!.isAnnualTaxExempt) ...[
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 8),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          const Text(
+                            'Tax Rate Applied',
+                            style: TextStyle(fontWeight: FontWeight.w500, color: Colors.black87),
+                          ),
+                          Text(
+                            '${_annualTaxResult!.taxRateApplied.toStringAsFixed(0)}%',
+                            style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.purple),
+                          ),
+                        ],
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.only(top: 4),
+                      child: Text(
+                        'Bracket: ${_annualTaxResult!.taxBracket}',
+                        style: TextStyle(fontSize: 12, color: Colors.grey[700]),
+                      ),
+                    ),
+                  ],
                   _resultRow('Annual Net Profit After Tax', _annualTaxResult!.annualNetProfitAfterTax, Colors.green),
                 ],
               ),
@@ -980,12 +1151,37 @@ class _ProfitCalculatorPageState extends State<ProfitCalculatorPage> {
           RichText(
             text: TextSpan(
               style: TextStyle(fontSize: 12, color: Colors.grey[700]),
-              children: const [
-                TextSpan(text: '• All income is aggregated annually as Gross Income\n'),
-                TextSpan(text: '• Expenses are deducted annually to get Net Taxable Income\n'),
-                TextSpan(text: '• If Annual Net Taxable Income ≤ ₱250,000 → Tax Exempt (0% tax)\n'),
-                TextSpan(text: '• Otherwise, graduated rates apply: 15%–35%'),
+              children: [
+                const TextSpan(text: '• All income is aggregated annually as Gross Income\n'),
+                const TextSpan(text: '• Expenses are deducted annually to get Net Taxable Income\n'),
+                TextSpan(
+                    text:
+                    '• If Annual Net Taxable Income ≤ ₱${_currentTaxBrackets[0].threshold.toInt().toString().replaceAllMapped(RegExp(r'(\d{1,3})(?=(\d{3})+(?!\d))'), (Match m) => '${m[1]},')} → Tax Exempt (0% tax)\n'),
+                const TextSpan(text: '• Otherwise, graduated rates apply: see brackets below'),
               ],
+            ),
+          ),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 8,
+            runSpacing: 6,
+            children: List.generate(
+              _currentTaxBrackets.length - 1,
+                  (i) {
+                final lower = _currentTaxBrackets[i].threshold;
+                final upper = _currentTaxBrackets[i + 1].threshold;
+                final rate = (_currentTaxBrackets[i + 1].rate * 100).toInt();
+                String range;
+                if (upper == double.infinity) {
+                  range = 'Over ₱${lower.toInt().toString().replaceAllMapped(RegExp(r'(\d{1,3})(?=(\d{3})+(?!\d))'), (Match m) => '${m[1]},')}';
+                } else {
+                  range = '₱${lower.toInt().toString().replaceAllMapped(RegExp(r'(\d{1,3})(?=(\d{3})+(?!\d))'), (Match m) => '${m[1]},')}–₱${upper.toInt().toString().replaceAllMapped(RegExp(r'(\d{1,3})(?=(\d{3})+(?!\d))'), (Match m) => '${m[1]},')}';
+                }
+                return Chip(
+                  label: Text('$range → $rate%'),
+                  backgroundColor: Colors.grey[200],
+                );
+              },
             ),
           ),
         ],
@@ -1113,8 +1309,30 @@ class _ProfitCalculatorPageState extends State<ProfitCalculatorPage> {
             style: const TextStyle(color: Colors.black87, fontSize: 28, fontWeight: FontWeight.bold),
           ),
           const SizedBox(height: 16),
-          _resultRow('Your Entry Income', _totalIncome, Colors.black87),
-          _resultRow('Your Entry Expenses', _totalExpenses, Colors.black87),
+          if (_incomeBreakdown.isNotEmpty)
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('Income Breakdown', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+                ..._incomeBreakdown.map((item) => _resultRow(item['name'] as String, item['value'] as double, Colors.green)),
+                const SizedBox(height: 8),
+                const Divider(thickness: 1, color: Colors.grey),
+                const SizedBox(height: 8),
+              ],
+            ),
+          if (_expenseBreakdown.isNotEmpty)
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('Expense Breakdown', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+                ..._expenseBreakdown.map((item) => _resultRow(item['name'] as String, item['value'] as double, Colors.red)),
+                const SizedBox(height: 8),
+                const Divider(thickness: 1, color: Colors.grey),
+                const SizedBox(height: 8),
+              ],
+            ),
+          _resultRow('Total Income', _totalIncome, Colors.black87),
+          _resultRow('Total Expenses', _totalExpenses, Colors.black87),
           const Divider(color: Colors.black26),
           _resultRow('New Cash Balance', _bankMoney + _netProfit, Colors.black87),
         ],
@@ -1323,25 +1541,55 @@ class _ProfitCalculatorPageState extends State<ProfitCalculatorPage> {
   }
 
   Widget _buildRecentRecords() {
-    return Container(
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 300),
+      curve: Curves.easeInOut,
       padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(20),
-        boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.05), blurRadius: 10, offset: const Offset(0, 4))],
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.05),
+            blurRadius: 10,
+            offset: const Offset(0, 4),
+          ),
+        ],
       ),
+      height: _isRecordsMaximized
+          ? MediaQuery.of(context).size.height * 0.85 // fullscreen height
+          : 400, // normal height
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text('Recent Records', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-          const SizedBox(height: 12),
+          Row(
+            children: [
+              const Text(
+                'Recent Records',
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+              ),
+              const Spacer(),
+              IconButton(
+                icon: Icon(
+                  _isRecordsMaximized
+                      ? Icons.fullscreen_exit
+                      : Icons.fullscreen,
+                  color: Colors.blue[600],
+                ),
+                tooltip: _isRecordsMaximized ? 'Minimize' : 'Maximize',
+                onPressed: () {
+                  setState(() => _isRecordsMaximized = !_isRecordsMaximized);
+                },
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
           Text(
             'Tap any record to view details or delete it.',
             style: TextStyle(fontSize: 13, color: Colors.grey[700]),
           ),
           const SizedBox(height: 12),
-          SizedBox(
-            height: 300,
+          Expanded(
             child: StreamBuilder<QuerySnapshot>(
               stream: FirebaseFirestore.instance
                   .collection('users')
@@ -1351,18 +1599,26 @@ class _ProfitCalculatorPageState extends State<ProfitCalculatorPage> {
                   .limit(500)
                   .snapshots(),
               builder: (context, snap) {
-                if (snap.hasError) return _buildErrorState(message: 'Error: ${snap.error}', onRetry: () => _loadChartData());
-                if (!snap.hasData) return const Center(child: CircularProgressIndicator());
+                if (snap.hasError) {
+                  return _buildErrorState(
+                    message: 'Error: ${snap.error}',
+                    onRetry: () => _loadChartData(),
+                  );
+                }
+                if (!snap.hasData) {
+                  return const Center(child: CircularProgressIndicator());
+                }
                 final docs = snap.data!.docs;
                 if (docs.isEmpty) {
                   return _buildEmptyState(
                     icon: Icons.receipt_long_rounded,
                     title: 'No Records Yet',
-                    subtitle: 'Your profit records will appear here after saving',
+                    subtitle: 'Your profit records will appear here after saving.',
                   );
                 }
                 return ListView.separated(
                   padding: EdgeInsets.zero,
+                  physics: const BouncingScrollPhysics(),
                   itemCount: docs.length,
                   separatorBuilder: (_, __) => const SizedBox(height: 8),
                   itemBuilder: (_, i) {
@@ -1400,19 +1656,31 @@ class _ProfitCalculatorPageState extends State<ProfitCalculatorPage> {
                                   children: [
                                     Text(
                                       'Net Profit: ${currency.format(netProfit)}',
-                                      style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 15),
+                                      style: const TextStyle(
+                                        fontWeight: FontWeight.w600,
+                                        fontSize: 15,
+                                      ),
                                     ),
                                     Text(
                                       DateFormat('MMM d').format(date),
-                                      style: TextStyle(color: Colors.grey[600], fontSize: 12),
+                                      style: TextStyle(
+                                        color: Colors.grey[600],
+                                        fontSize: 12,
+                                      ),
                                     ),
                                   ],
                                 ),
                               ),
                               const SizedBox(width: 8),
                               IconButton(
-                                icon: const Icon(Icons.delete_outline_rounded, color: Colors.red, size: 20),
-                                onPressed: _isLoading ? null : () => _deleteRecord(docs[i].id),
+                                icon: const Icon(
+                                  Icons.delete_outline_rounded,
+                                  color: Colors.red,
+                                  size: 20,
+                                ),
+                                onPressed: _isLoading
+                                    ? null
+                                    : () => _deleteRecord(docs[i].id),
                                 tooltip: 'Delete',
                               ),
                             ],
@@ -1488,7 +1756,7 @@ class _ProfitCalculatorPageState extends State<ProfitCalculatorPage> {
     child: Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: [
-        Text(label, style: const TextStyle(fontWeight: FontWeight.w500, color: Colors.black87)),
+        Expanded(child: Text(label, style: const TextStyle(fontWeight: FontWeight.w500, color: Colors.black87))),
         Text(currency.format(value), style: TextStyle(fontWeight: FontWeight.bold, color: color)),
       ],
     ),
@@ -1575,12 +1843,182 @@ class _ProfitCalculatorPageState extends State<ProfitCalculatorPage> {
   }
 }
 
+// === NEW: Admin Tax Settings Page ===
+class AdminTaxSettingsPage extends StatefulWidget {
+  const AdminTaxSettingsPage({super.key});
+
+  @override
+  State<AdminTaxSettingsPage> createState() => _AdminTaxSettingsPageState();
+}
+
+class _AdminTaxSettingsPageState extends State<AdminTaxSettingsPage> {
+  List<TextEditingController> _thresholdControllers = [];
+  List<TextEditingController> _rateControllers = [];
+  List<TextEditingController> _baseTaxControllers = [];
+  bool _isSaving = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // Initialize controllers with current tax brackets
+    _thresholdControllers = List.generate(_currentTaxBrackets.length, (i) => TextEditingController(text: _currentTaxBrackets[i].threshold == double.infinity ? '' : _currentTaxBrackets[i].threshold.toString()));
+    _rateControllers = List.generate(_currentTaxBrackets.length, (i) => TextEditingController(text: (_currentTaxBrackets[i].rate * 100).toString()));
+    _baseTaxControllers = List.generate(_currentTaxBrackets.length, (i) => TextEditingController(text: _currentTaxBrackets[i].baseTax.toString()));
+  }
+
+  @override
+  void dispose() {
+    for (var c in _thresholdControllers) {
+      c.dispose();
+    }
+    for (var c in _rateControllers) {
+      c.dispose();
+    }
+    for (var c in _baseTaxControllers) {
+      c.dispose();
+    }
+    super.dispose();
+  }
+
+  Future<void> _saveTaxSettings() async {
+    setState(() => _isSaving = true);
+    try {
+      List<TaxBracket> newBrackets = [];
+      for (int i = 0; i < _thresholdControllers.length; i++) {
+        double threshold;
+        if (i == _thresholdControllers.length - 1 || _thresholdControllers[i].text.isEmpty) {
+          threshold = double.infinity;
+        } else {
+          threshold = double.tryParse(_thresholdControllers[i].text) ?? 0;
+        }
+        double rate = (double.tryParse(_rateControllers[i].text) ?? 0) / 100;
+        double baseTax = double.tryParse(_baseTaxControllers[i].text) ?? 0;
+        newBrackets.add(TaxBracket(threshold: threshold, rate: rate, baseTax: baseTax));
+      }
+
+      // Validate: thresholds must be increasing
+      for (int i = 1; i < newBrackets.length - 1; i++) {
+        if (newBrackets[i].threshold <= newBrackets[i - 1].threshold) {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Thresholds must be increasing'), backgroundColor: Colors.red));
+          setState(() => _isSaving = false);
+          return;
+        }
+      }
+
+      // Save to Firestore
+      await FirebaseFirestore.instance.collection('system').doc('taxSettings').set({
+        'brackets': newBrackets.map((b) => b.toJson()).toList(),
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+
+      // Update global variable
+      _currentTaxBrackets = newBrackets;
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Tax settings saved successfully!')));
+        Navigator.pop(context);
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error saving: $e')));
+      }
+    } finally {
+      if (mounted) setState(() => _isSaving = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Admin Tax Settings'),
+        backgroundColor: Colors.purple[600],
+        foregroundColor: Colors.white,
+      ),
+      body: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          children: [
+            const Text(
+              'Edit graduated tax brackets',
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 16),
+            Expanded(
+              child: ListView.builder(
+                itemCount: _thresholdControllers.length,
+                itemBuilder: (context, i) {
+                  return Card(
+                    margin: const EdgeInsets.symmetric(vertical: 6),
+                    child: Padding(
+                      padding: const EdgeInsets.all(12),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text('Bracket ${i + 1}', style: const TextStyle(fontWeight: FontWeight.bold)),
+                          const SizedBox(height: 8),
+                          if (i < _thresholdControllers.length - 1)
+                            TextField(
+                              controller: _thresholdControllers[i],
+                              keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                              decoration: InputDecoration(
+                                labelText: 'Upper Threshold (₱)',
+                                hintText: i == 0 ? 'e.g. 250000' : 'e.g. 400000',
+                              ),
+                            )
+                          else
+                            const Text('Final bracket (no upper limit)'),
+                          const SizedBox(height: 8),
+                          TextField(
+                            controller: _rateControllers[i],
+                            keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                            decoration: const InputDecoration(
+                              labelText: 'Tax Rate (%)',
+                              hintText: 'e.g. 15',
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          TextField(
+                            controller: _baseTaxControllers[i],
+                            keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                            decoration: const InputDecoration(
+                              labelText: 'Base Tax (₱)',
+                              hintText: 'e.g. 22500',
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
+            const SizedBox(height: 16),
+            ElevatedButton.icon(
+              onPressed: _isSaving ? null : _saveTaxSettings,
+              icon: _isSaving ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, valueColor: AlwaysStoppedAnimation(Colors.white))) : const Icon(Icons.save),
+              label: Text(_isSaving ? 'Saving...' : 'Save Tax Settings'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.purple[600],
+                foregroundColor: Colors.white,
+                minimumSize: const Size(double.infinity, 50),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// === UPDATED: _RecordDetailsDialog shows detailed breakdown ===
 class _RecordDetailsDialog extends StatelessWidget {
   final Map<String, dynamic> recordData;
   final String recordId;
   final DateTime date;
   final NumberFormat currency;
   final VoidCallback onDelete;
+
   const _RecordDetailsDialog({
     required this.recordData,
     required this.recordId,
@@ -1594,6 +2032,20 @@ class _RecordDetailsDialog extends StatelessWidget {
     final grossIncome = (recordData['grossIncome'] ?? 0.0).toDouble();
     final expenses = (recordData['expenses'] ?? 0.0).toDouble();
     final netProfit = (recordData['netProfit'] ?? 0.0).toDouble();
+    final customParams = (recordData['customParameters'] as Map<String, dynamic>?) ?? {};
+    List<Map<String, dynamic>> incomeList = [];
+    List<Map<String, dynamic>> expenseList = [];
+    customParams.forEach((name, data) {
+      if (data is Map) {
+        final value = (data['value'] as num?)?.toDouble() ?? 0.0;
+        final type = data['type'] as String?;
+        if (type == 'income') {
+          incomeList.add({'name': name, 'value': value});
+        } else {
+          expenseList.add({'name': name, 'value': value});
+        }
+      }
+    });
     return Dialog(
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
       child: Container(
@@ -1634,8 +2086,22 @@ class _RecordDetailsDialog extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    _buildDetailRow('Entry Gross Income', grossIncome, Colors.green),
-                    _buildDetailRow('Entry Expenses', expenses, Colors.red),
+                    if (incomeList.isNotEmpty) ...[
+                      const Text('Income Breakdown', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+                      ...incomeList.map((item) => _buildDetailRow(item['name'] as String, item['value'] as double, Colors.green)),
+                      const SizedBox(height: 12),
+                      const Divider(thickness: 1, color: Colors.grey),
+                      const SizedBox(height: 12),
+                    ],
+                    if (expenseList.isNotEmpty) ...[
+                      const Text('Expense Breakdown', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+                      ...expenseList.map((item) => _buildDetailRow(item['name'] as String, item['value'] as double, Colors.red)),
+                      const SizedBox(height: 12),
+                      const Divider(thickness: 1, color: Colors.grey),
+                      const SizedBox(height: 12),
+                    ],
+                    _buildDetailRow('Total Income', grossIncome, Colors.green),
+                    _buildDetailRow('Total Expenses', expenses, Colors.red),
                     _buildDetailRow('Net Profit', netProfit, netProfit >= 0 ? Colors.green : Colors.red),
                   ],
                 ),
@@ -1701,6 +2167,7 @@ class _RecordDetailsDialog extends StatelessWidget {
 
 class _AddParameterDialog extends StatefulWidget {
   final Function(String name, String type, IconData icon) onAdd;
+
   const _AddParameterDialog({required this.onAdd});
 
   @override
@@ -1811,5 +2278,6 @@ class _SnackBarConfig {
   final IconData? icon;
   final Color color;
   final bool isLoading;
+
   _SnackBarConfig({required this.icon, required this.color, this.isLoading = false});
 }
